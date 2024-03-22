@@ -5,7 +5,7 @@
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::{Channel, Receiver};
 
-use defmt::{info, println, unwrap};
+use defmt::{error, info, println, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_rp::bind_interrupts;
@@ -73,7 +73,7 @@ async fn midi_runner(
         buf[0] = 0x09;
         buf[1] = 0x90;
         println!("Key {} press {}", key & 0xF, key & 0xF0);
-        buf[2] = (key & 0x0F); // + 0x3C;
+        buf[2] = key & 0x0F; // + 0x3C;
         buf[3] = if key & 0xF0 != 0x00 { 0x7F } else { 0x00 };
 
         // let pos = class.read_packet(&mut buf).await.unwrap();
@@ -243,11 +243,12 @@ async fn main(spawner: Spawner) {
                 let diff = inp ^ old;
                 for bit in 0..16_u16 {
                     if diff & (1 << bit) != 0x00 {
-                        let data = (bit as u8) | if inp & (1 << bit) == 0x00 { 0x80 } else { 0x00 };
+                        let data = u8::try_from(bit & 0xFF).unwrap()
+                            | if inp & (1 << bit) == 0x00 { 0x80 } else { 0x00 };
 
                         println!("Key {} press {}", data & 0xF, data & 0xF0);
-                        if let Err(e) = keys.try_send(data) {
-                            println!("Error Send");
+                        if keys.try_send(data).is_err() {
+                            error!("Error Send");
                         };
 
                         let led_0: u32 = if inp & (1 << bit) == 0x00 {
