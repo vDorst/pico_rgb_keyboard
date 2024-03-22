@@ -230,15 +230,6 @@ async fn main(spawner: Spawner) {
                     .await;
 
                 let inp: u16 = u16::from_ne_bytes(i2c_input);
-                // for bit in 0..16_u16 {
-                //     let led_0: u32 = if inp & (1 << bit) == 0x00 {
-                //         0xFF00_4000_u32.to_be()
-                //     } else {
-                //         LED_DEFAULT
-                //     };
-                //     let pos: usize = 1 + usize::from(bit);
-                //     led_buff[pos] = led_0;
-                // }
 
                 let diff = inp ^ old;
                 for bit in 0..16_u16 {
@@ -251,12 +242,13 @@ async fn main(spawner: Spawner) {
                             error!("Error Send");
                         };
 
+                        let pos: usize = 1 + usize::from(bit);
+
                         let led_0: u32 = if inp & (1 << bit) == 0x00 {
                             0xFF00_4000_u32.to_be()
                         } else {
                             LED_DEFAULT
                         };
-                        let pos: usize = 1 + usize::from(bit);
                         led_buff[pos] = led_0;
                     }
                 }
