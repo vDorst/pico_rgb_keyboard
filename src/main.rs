@@ -1,4 +1,5 @@
 #![deny(clippy::pedantic)]
+#![deny(clippy::unwrap_used)]
 #![no_std]
 #![no_main]
 
@@ -67,26 +68,37 @@ async fn midi_runner(
     let mut buf = [0; 64];
 
     loop {
-        // info!("Connected");
-        let key = keys.receive().await;
+        class.wait_connection().await;
+        info!("Connected");
+        loop {
+            match embassy_futures::select::select(class.read_packet(&mut buf), keys.receive()).await
+            {
+                Either::First(ret_read) => match ret_read {
+                    Ok(n) => info!("New: {:02x}", &buf[0..n]),
+                    Err(_) => break,
+                },
+                Either::Second(key) => {
+                    buf[0] = 0x09;
+                    buf[1] = 0x90;
+                    println!("Key {} press {}", key & 0xF, key & 0xF0);
+                    buf[2] = key & 0x0F; // + 0x3C;
+                    buf[3] = if key & 0xF0 != 0x00 { 0x7F } else { 0x00 };
 
-        buf[0] = 0x09;
-        buf[1] = 0x90;
-        println!("Key {} press {}", key & 0xF, key & 0xF0);
-        buf[2] = key & 0x0F; // + 0x3C;
-        buf[3] = if key & 0xF0 != 0x00 { 0x7F } else { 0x00 };
-
-        // let pos = class.read_packet(&mut buf).await.unwrap();
-        let data = &buf[0..4];
-        info!("data: {:x}", data);
-        class.write_packet(data).await.unwrap();
-        // info!("Disconnect");
+                    // let pos = class.read_packet(&mut buf).await.unwrap();
+                    let data = &buf[0..4];
+                    info!("data: {:x}", data);
+                    if class.write_packet(data).await.is_err() {
+                        break;
+                    };
+                }
+            };
+        }
+        info!("Disconnect");
     }
 }
 
 // Create embassy-usb DeviceBuilder using the driver and config.
 // It needs some buffers for building the descriptors.
-static DEVICE_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 // static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
@@ -168,7 +180,6 @@ async fn main(spawner: Spawner) {
     let mut builder = Builder::new(
         driver,
         config,
-        DEVICE_DESC.init([0; 256]),
         CONFIG_DESC.init([0; 256]),
         BOS_DESC.init([0; 256]),
         &mut [], // no msos descriptors
@@ -234,8 +245,7 @@ async fn main(spawner: Spawner) {
                 let diff = inp ^ old;
                 for bit in 0..16_u16 {
                     if diff & (1 << bit) != 0x00 {
-                        let data = u8::try_from(bit & 0xFF).unwrap()
-                            | if inp & (1 << bit) == 0x00 { 0x80 } else { 0x00 };
+                        let data = (bit as u8) | if inp & (1 << bit) == 0x00 { 0x80 } else { 0x00 };
 
                         println!("Key {} press {}", data & 0xF, data & 0xF0);
                         if keys.try_send(data).is_err() {
