@@ -3,12 +3,12 @@
 #![no_std]
 #![no_main]
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::channel::{Channel, Receiver};
+use {defmt_rtt as _, panic_probe as _};
 
-use defmt::{error, info, println, unwrap};
+use defmt::{error, info, println, unwrap, Format};
+
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either, Either3};
 use embassy_rp::bind_interrupts;
 use embassy_rp::config::Config;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
@@ -16,12 +16,12 @@ use embassy_rp::i2c::{self, Config as I2C_Config, InterruptHandler as I2C_IH};
 use embassy_rp::peripherals::{I2C0, USB};
 use embassy_rp::spi::{Config as SPI_Config, Spi};
 use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_time::Timer;
-use embedded_hal_async::i2c::I2c;
-use {defmt_rtt as _, panic_probe as _};
-
 use embassy_usb::class::midi::MidiClass;
 use embassy_usb::{Builder, Config as USB_Config};
+use embedded_hal_async::i2c::I2c;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -60,33 +60,69 @@ async fn usb_runner(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, USB
     }
 }
 
+#[derive(Format)]
+pub struct Event {
+    key: u8,
+    velos: u8,
+}
+
+#[derive(Format)]
+pub enum MidiEvent {
+    NoteOn(Event),
+    NoteOff(Event),
+}
+
 #[embassy_executor::task]
 async fn midi_runner(
     mut class: MidiClass<'static, Driver<'static, USB>>,
-    keys: Receiver<'static, NoopRawMutex, u8, 16>,
+    send_keys: Receiver<'static, NoopRawMutex, u8, 16>,
+    midi_events: Sender<'static, NoopRawMutex, MidiEvent, 4>,
 ) {
-    let mut buf = [0; 64];
+    let mut buf = [0; 32];
 
     loop {
         class.wait_connection().await;
         info!("Connected");
         loop {
-            match embassy_futures::select::select(class.read_packet(&mut buf), keys.receive()).await
+            match embassy_futures::select::select(class.read_packet(&mut buf), send_keys.receive())
+                .await
             {
                 Either::First(ret_read) => match ret_read {
-                    Ok(n) => info!("New: {:02x}", &buf[0..n]),
+                    Ok(n) => {
+                        let data = &buf[0..n];
+                        // info!("New: {:02x}", data);
+                        for data in data.chunks_exact(4) {
+                            let event: Option<MidiEvent> = match data[0] & 0x0F {
+                                0x08 => Some(MidiEvent::NoteOff(Event {
+                                    key: data[2],
+                                    velos: data[3],
+                                })),
+                                0x09 => Some(MidiEvent::NoteOn(Event {
+                                    key: data[2],
+                                    velos: data[3],
+                                })),
+                                _ => None,
+                            };
+                            if let Some(event) = event {
+                                // info!("Send Event: {}", event);
+                                if midi_events.try_send(event).is_err() {
+                                    error!("Can´t send midi events");
+                                }
+                            }
+                        }
+                    }
                     Err(_) => break,
                 },
                 Either::Second(key) => {
                     buf[0] = 0x09;
                     buf[1] = 0x90;
-                    println!("Key {} press {}", key & 0xF, key & 0xF0);
+                    // println!("Key {:02x} press {:02x}", key & 0xF, key & 0xF0);
                     buf[2] = key & 0x0F; // + 0x3C;
                     buf[3] = if key & 0xF0 != 0x00 { 0x7F } else { 0x00 };
 
                     // let pos = class.read_packet(&mut buf).await.unwrap();
                     let data = &buf[0..4];
-                    info!("data: {:x}", data);
+                    // info!("data: {:02x}", data);
                     if class.write_packet(data).await.is_err() {
                         break;
                     };
@@ -105,6 +141,22 @@ static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 128]> = StaticCell::new();
 
 static KEY_CHAN: StaticCell<Channel<NoopRawMutex, u8, 16>> = StaticCell::new();
+static EVENTS_CHAN: StaticCell<Channel<NoopRawMutex, MidiEvent, 4>> = StaticCell::new();
+
+#[derive(Clone, Copy)]
+enum LedMode {
+    Idle,
+    Midi((u8, bool)),
+}
+
+impl PartialEq for LedMode {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Midi(_l0), Self::Midi(_r0)) => true,
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -157,7 +209,7 @@ async fn main(spawner: Spawner) {
     // // All pins as input
     i2c.write(tca9555::ADDR, &[tca9555::Reg::CfgP0 as u8, 0xFF, 0xFF])
         .await
-        .unwrap();
+        .expect("Should able to talk to GPIO");
 
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
@@ -165,7 +217,7 @@ async fn main(spawner: Spawner) {
     // Create embassy-usb Config
     let mut config = USB_Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
-    config.product = Some("USB-MIDI example");
+    config.product = Some("USB-MIDI PICO RGB KEYPAD");
     config.serial_number = Some("12345678");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
@@ -196,11 +248,13 @@ async fn main(spawner: Spawner) {
     unwrap!(spawner.spawn(usb_runner(usb)));
     // Timer::after_millis(10).await;
 
-    let keys: Channel<NoopRawMutex, u8, 16> = embassy_sync::channel::Channel::new();
+    let keys = embassy_sync::channel::Channel::new();
+    let events = embassy_sync::channel::Channel::new();
 
     let keys = KEY_CHAN.init(keys);
+    let events = EVENTS_CHAN.init(events);
 
-    unwrap!(spawner.spawn(midi_runner(class, keys.receiver())));
+    unwrap!(spawner.spawn(midi_runner(class, keys.receiver(), events.sender())));
 
     let mut led_status = false;
     let mut lvl = 0xFF;
@@ -210,28 +264,12 @@ async fn main(spawner: Spawner) {
     let mut i2c_input: [u8; 2] = [0xFF, 0xFF];
     let mut old: u16 = 0xFFFF;
 
+    let mut led_mode = LedMode::Idle;
+    let mut led_old_mode = LedMode::Idle;
+
     loop {
-        match select(&mut tick, key_int.wait_for_low()).await {
-            Either::First(()) => {
-                tick = Timer::after_millis(500);
-                let led_0: u32 = if led_status {
-                    0xFF00_0008_u32.to_be()
-                } else {
-                    LED_DEFAULT
-                };
-
-                led_buff[1] = led_0;
-                led_buff[2] = u32::from_le_bytes([0xFF, lvl, 0x00, 0x00]);
-                led_buff[3] = u32::from_le_bytes([0xFF, 0x00, lvl, 0x00]);
-                led_buff[4] = u32::from_le_bytes([0xFF, 0x00, 0x00, lvl]);
-                led_buff[8] = u32::from_le_bytes([0xFF, 0x00, lvl, lvl]);
-                led_buff[12] = u32::from_le_bytes([0xFF, lvl, 0x00, lvl]);
-                led_buff[16] = u32::from_le_bytes([0xFF, lvl, lvl, 0x00]);
-
-                lvl = lvl.wrapping_add(16);
-                led_status = !led_status;
-            }
-            Either::Second(()) => {
+        match select3(key_int.wait_for_low(), &mut tick, events.receive()).await {
+            Either3::First(()) => {
                 let _ = i2c
                     .write_read_async(
                         u16::from(tca9555::ADDR),
@@ -242,35 +280,74 @@ async fn main(spawner: Spawner) {
 
                 let inp: u16 = u16::from_ne_bytes(i2c_input);
 
-                let diff = inp ^ old;
-                for bit in 0..16_u16 {
-                    if diff & (1 << bit) != 0x00 {
-                        let data = (bit as u8) | if inp & (1 << bit) == 0x00 { 0x80 } else { 0x00 };
+                let mut diff = inp ^ old;
+                while diff != 0 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let bit = diff.trailing_zeros() as u8;
 
-                        println!("Key {} press {}", data & 0xF, data & 0xF0);
-                        if keys.try_send(data).is_err() {
-                            error!("Error Send");
-                        };
+                    let mask = 1 << bit;
 
-                        let pos: usize = 1 + usize::from(bit);
+                    diff ^= mask;
 
-                        let led_0: u32 = if inp & (1 << bit) == 0x00 {
-                            0xFF00_4000_u32.to_be()
-                        } else {
-                            LED_DEFAULT
-                        };
-                        led_buff[pos] = led_0;
-                    }
+                    let is_pressed = inp & mask == 0x00;
+
+                    let data = bit | if is_pressed { 0x80 } else { 0x00 };
+
+                    // println!("Key {:02x} press {:02x}", data & 0xF, data & 0xF0);
+                    if keys.try_send(data).is_err() {
+                        error!("Error Send");
+                    };
                 }
 
                 old = inp;
+            }
+            Either3::Second(()) => {
+                led_mode = LedMode::Idle;
+            }
+            Either3::Third(event) => {
+                let (led, is_pressed) = match event {
+                    MidiEvent::NoteOn(event) => (event.key, true),
+                    MidiEvent::NoteOff(event) => (event.key, false),
+                };
 
-                tick = Timer::after_secs(5);
-                lvl = 0;
+                led_mode = LedMode::Midi((led, is_pressed));
+            }
+        }
+
+        if led_mode != led_old_mode {
+            println!("Led mode changed!");
+            let last = led_buff.len() - 1;
+            for led in &mut led_buff[1..last] {
+                *led = LED_DEFAULT;
+            }
+            lvl = 0;
+        }
+
+        match led_mode {
+            LedMode::Idle => {
+                // led_buff[1] = led_0;
+                led_buff[2] = u32::from_le_bytes([0xFF, lvl, 0x00, 0x00]);
+                led_buff[3] = u32::from_le_bytes([0xFF, 0x00, lvl, 0x00]);
+                led_buff[4] = u32::from_le_bytes([0xFF, 0x00, 0x00, lvl]);
+                led_buff[8] = u32::from_le_bytes([0xFF, 0x00, lvl, lvl]);
+                led_buff[12] = u32::from_le_bytes([0xFF, lvl, 0x00, lvl]);
+                led_buff[16] = u32::from_le_bytes([0xFF, lvl, lvl, 0x00]);
+
+                lvl = lvl.wrapping_add(16);
+                led_status = !led_status;
+
+                tick = Timer::after_millis(250);
+            }
+            LedMode::Midi((key, value)) => {
+                let pos = 1 + usize::from(key & 0x0f);
+                led_buff[pos] = if value { 0x0111_01FF } else { LED_DEFAULT };
+                tick = Timer::after_millis(5000);
             }
         }
 
         let buf: [u8; BUF_BYTE_SIZE] = unsafe { core::mem::transmute(led_buff) };
         spi.write(&buf).await.unwrap();
+
+        led_old_mode = led_mode;
     }
 }

@@ -65,7 +65,7 @@ version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5deb64efa5bd81e31fcd1938615a6d98c82eafcbcd787162b6f63b91d6bac5b3"
 dependencies = [
- "rustc_version 0.2.3",
+ "rustc_version",
 ]
 
 [[package]]
@@ -332,9 +332,9 @@ dependencies = [
 
 [[package]]
 name = "embassy-executor"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78b1ff3528e58bdefda6be4a68a61e0887a636f06382a87ed5bd99d916cb4bf6"
+checksum = "f64f84599b0f4296b92a4b6ac2109bc02340094bda47b9766c5f9ec6a318ebf8"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -343,7 +343,6 @@ dependencies = [
  "embassy-executor-macros",
  "embassy-time-driver",
  "embassy-time-queue-driver",
- "rustc_version 0.4.1",
 ]
 
 [[package]]
@@ -925,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "pico-rgb-keysboard"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -1140,16 +1139,7 @@ version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "138e3e0acb6c9fb258b19b67cb8abd63c00679d2851805ea151465464fe9030a"
 dependencies = [
- "semver 0.9.0",
-]
-
-[[package]]
-name = "rustc_version"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
-dependencies = [
- "semver 1.0.23",
+ "semver",
 ]
 
 [[package]]
@@ -1172,12 +1162,6 @@ checksum = "1d7eb9ef2c18661902cc47e535f9bc51b78acd254da71d375c2f6720d9a40403"
 dependencies = [
  "semver-parser",
 ]
-
-[[package]]
-name = "semver"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61697e0a1c7e512e84a621326239844a24d8207b4669b41bc18b32ea5cbf988b"
 
 [[package]]
 name = "semver-parser"
